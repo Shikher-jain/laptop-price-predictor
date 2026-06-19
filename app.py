@@ -1,10 +1,69 @@
 import streamlit as st
 import pickle
 import numpy as np
+import pandas as pd
+from pathlib import Path
+
+
+def enable_numpy_randomstate_pickle_compat():
+    """Allow loading pickle payloads that call __randomstate_ctor with 2 args."""
+    try:
+        import numpy.random._pickle as np_pickle
+
+        original_ctor = np_pickle.__randomstate_ctor
+
+        def _compat_ctor(state=None, *args):
+            return original_ctor(state)
+
+        np_pickle.__randomstate_ctor = _compat_ctor
+    except Exception:
+        # If internals are unavailable, continue with default behavior.
+        pass
+
+
+def enable_xgboost_pickle_compat():
+    """Backfill missing attrs on unpickled XGBoost estimators for sklearn get_params."""
+    try:
+        from xgboost.sklearn import XGBModel
+
+        original_get_params = XGBModel.get_params
+        if getattr(original_get_params, "__name__", "") == "_compat_get_params":
+            return
+
+        def _compat_get_params(self, deep=True):
+            # Older serialized estimators can miss newer/expected init attrs.
+            for param_name in self._get_param_names():
+                if not hasattr(self, param_name):
+                    setattr(self, param_name, None)
+            return original_get_params(self, deep=deep)
+
+        XGBModel.get_params = _compat_get_params
+    except Exception:
+        # If xgboost is unavailable, continue with default behavior.
+        pass
+
+
+def load_pickle_or_stop(file_name):
+    """Load pickle artifacts and show a friendly error if dependency versions mismatch."""
+    try:
+        with open(Path(file_name), 'rb') as f:
+            return pickle.load(f)
+    except AttributeError as exc:
+        message = str(exc)
+        if '__pyx_unpickle_CyHalfSquaredError' in message:
+            st.error(
+                "Model artifact and installed scikit-learn version are incompatible. "
+                "This project expects scikit-learn==1.4.2. "
+                "Reinstall dependencies with: pip install -r requirements.txt"
+            )
+            st.stop()
+        raise
 
 # import the model
-pipe = pickle.load(open('pipe.pkl','rb'))
-df = pickle.load(open('df.pkl','rb'))
+enable_numpy_randomstate_pickle_compat()
+enable_xgboost_pickle_compat()
+pipe = load_pickle_or_stop('pipe.pkl')
+df = load_pickle_or_stop('df.pkl')
 
 st.title("Laptop Predictor")
 
@@ -59,8 +118,21 @@ if st.button('Predict Price'):
     X_res = int(resolution.split('x')[0])
     Y_res = int(resolution.split('x')[1])
     ppi = ((X_res**2) + (Y_res**2))**0.5/screen_size
-    query = np.array([company,type,ram,weight,touchscreen,ips,ppi,cpu,hdd,ssd,gpu,os])
-
-    query = query.reshape(1,12)
+    query = pd.DataFrame(
+        [{
+            'Company': company,
+            'TypeName': type,
+            'Ram': int(ram),
+            'Weight': float(weight),
+            'Touchscreen': int(touchscreen),
+            'Ips': int(ips),
+            'ppi': float(ppi),
+            'Cpu brand': cpu,
+            'HDD': int(hdd),
+            'SSD': int(ssd),
+            'Gpu brand': gpu,
+            'os': os,
+        }]
+    )
     st.title("The predicted price of this configuration is " + str(int(np.exp(pipe.predict(query)[0]))))
 
